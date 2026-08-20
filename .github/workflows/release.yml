@@ -1,0 +1,67 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp the version from the tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          plutil -replace CFBundleShortVersionString -string "$VERSION" Resources/Info.plist
+          plutil -replace CFBundleVersion -string "${GITHUB_RUN_NUMBER}" Resources/Info.plist
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          APP=build/JustHide.app
+          lipo -archs "$APP/Contents/MacOS/JustHide"
+          codesign --verify --strict "$APP"
+
+      - name: Package
+        run: ditto -c -k --sequesterRsrc --keepParent build/JustHide.app JustHide.zip
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > notes.md <<'NOTES'
+          ## Установка
+
+          1. Скачайте `JustHide.zip` ниже и распакуйте.
+          2. Перетащите `JustHide.app` в `/Applications`.
+          3. Снимите карантин — приложение подписано ad-hoc, без платного
+             Developer ID, поэтому Gatekeeper блокирует его после скачивания:
+
+          ```bash
+          xattr -dr com.apple.quarantine /Applications/JustHide.app
+          open /Applications/JustHide.app
+          ```
+
+          Либо соберите из исходников, тогда карантина не будет вовсе:
+
+          ```bash
+          git clone https://github.com/Heisenberg4441/just-hide-your-tray-icons.git
+          cd just-hide-your-tray-icons && ./install.sh
+          ```
+
+          Universal (arm64 + x86_64), macOS 13+.
+          NOTES
+
+          gh release create "$GITHUB_REF_NAME" JustHide.zip \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md

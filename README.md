@@ -1,5 +1,7 @@
 # just-hide-your-tray-icons
 
+[![build](https://github.com/Heisenberg4441/just-hide-your-tray-icons/actions/workflows/build.yml/badge.svg)](https://github.com/Heisenberg4441/just-hide-your-tray-icons/actions/workflows/build.yml)
+
 Минималистичный аналог Bartender для macOS. Прячет иконки меню-бара за одну
 стрелочку — клик по ней возвращает их обратно.
 
@@ -22,13 +24,27 @@
 
 ## Быстрая установка
 
-Нужны Command Line Tools (`xcode-select --install`), больше ничего.
+Из исходников — нужны Command Line Tools (`xcode-select --install`), больше
+ничего:
 
 ```bash
 git clone https://github.com/Heisenberg4441/just-hide-your-tray-icons.git
 cd just-hide-your-tray-icons
 ./install.sh
 ```
+
+Либо готовой сборкой со страницы
+[Releases](https://github.com/Heisenberg4441/just-hide-your-tray-icons/releases):
+распакуйте `JustHide.zip`, положите `JustHide.app` в `/Applications` и снимите
+карантин — приложение подписано ad-hoc, без платного Developer ID, поэтому
+Gatekeeper блокирует его после скачивания:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/JustHide.app
+open /Applications/JustHide.app
+```
+
+Сборка из исходников этого шага не требует.
 
 Скрипт соберёт universal-бинарник (arm64 + x86_64), положит `JustHide.app` в
 `/Applications` и запустит. Иконки спрячутся сразу.

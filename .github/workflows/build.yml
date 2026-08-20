@@ -1,0 +1,59 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push makes the previous build pointless.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          swiftc --version
+          xcodebuild -version | head -1
+
+      - name: Build
+        run: ./build.sh
+
+      - name: Verify the bundle
+        run: |
+          set -euo pipefail
+          APP=build/JustHide.app
+          BIN="$APP/Contents/MacOS/JustHide"
+
+          test -x "$BIN" || { echo "::error::executable missing"; exit 1; }
+          plutil -lint "$APP/Contents/Info.plist"
+
+          # A universal binary is the whole point of the two-slice build.
+          archs=$(lipo -archs "$BIN")
+          echo "archs: $archs"
+          for want in arm64 x86_64; do
+            case "$archs" in *"$want"*) ;; *) echo "::error::missing $want slice"; exit 1 ;; esac
+          done
+
+          # Unsigned arm64 binaries are killed on launch, so the ad-hoc
+          # signature is load-bearing rather than cosmetic.
+          codesign --verify --strict --verbose=2 "$APP"
+
+          # Menu-bar-only app: no Dock tile, no app menu.
+          test "$(plutil -extract LSUIElement raw -o - "$APP/Contents/Info.plist")" = "true" \
+            || { echo "::error::LSUIElement is not set"; exit 1; }
+
+      - name: Package
+        run: ditto -c -k --sequesterRsrc --keepParent build/JustHide.app JustHide.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JustHide
+          path: JustHide.zip
+          if-no-files-found: error
