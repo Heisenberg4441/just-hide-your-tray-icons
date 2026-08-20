@@ -166,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleSystemChevron(_ sender: NSMenuItem) {
         hider.hidesSystemChevron.toggle()
         sender.state = hider.hidesSystemChevron ? .on : .off
-        hider.revalidate(force: true)
+        hider.recalibrateNow()
     }
 
     /// For when a ⌘-drag has left the arrow on the wrong side of the expander,
@@ -202,6 +202,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 self.hider.hide()
             }
+        }
+    }
+
+    private var pendingRevalidate: Task<Void, Never>?
+
+    private func scheduleRevalidate() {
+        pendingRevalidate?.cancel()
+        pendingRevalidate = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            hider.revalidate(force: true)
         }
     }
 
@@ -244,10 +255,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// all of which can either free up room (icons creep back into view) or
     /// take it away (the expander gets dropped and everything reappears).
     private func observeMenuBarChanges() {
+        // Switching apps fires this constantly, and ⌘-tabbing through several
+        // apps fires it several times in a row. Coalesce them.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil, queue: .main
-        ) { _ in Task { @MainActor in self.hider.revalidate(force: true) } }
+        ) { _ in Task { @MainActor in self.scheduleRevalidate() } }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,

@@ -68,6 +68,14 @@ final class MenuBarHider {
     /// gives up on the expander altogether and every icon springs back. The
     /// middle of that band is the safe place to sit.
     private let chevronOvershoot: CGFloat = 120
+    /// The arrow is deliberately a fixed width rather than
+    /// `NSStatusItem.variableLength`. A variable-length item makes macOS treat
+    /// the whole run as elastic: instead of folding the neighbouring icons away
+    /// it quietly clips the expander, and a handful of icons nearest the arrow
+    /// stay on show no matter how long the expander gets. Measured on macOS 27:
+    /// same expander, same positions, variable-length arrow leaves four icons
+    /// visible, fixed-width arrow hides every one of them.
+    private let arrowWidth: CGFloat = 30
     /// Width of the separator while the icons are on show. AppKit floors a
     /// status item at roughly 16pt anyway, so this is as thin as it gets.
     private let separatorWidth: CGFloat = 8
@@ -90,6 +98,11 @@ final class MenuBarHider {
     /// Set while the menu bar has no room for us at all, so the background poll
     /// stops re-measuring a situation it cannot fix.
     private var stoodDownAt: Date?
+    /// Length at which growth last ran out of room, *before* the overshoot that
+    /// swallows the system chevron. Re-measuring starts here rather than from
+    /// scratch — and the overshoot is always applied to this, never to a length
+    /// that already includes one, which would make it creep up on every pass.
+    private var wallLength: CGFloat = 0
     /// Where the expander's left edge ended up last time we measured. If it has
     /// drifted right, the bar has room we are no longer using — icons will have
     /// crept back into view.
@@ -106,7 +119,7 @@ final class MenuBarHider {
         // Created first so it starts out right of the expander even before the
         // preferred positions are honoured.
         arrowItem = Self.makeItem(in: bar, autosaveName: Autosave.arrow,
-                                  position: Position.arrow, length: NSStatusItem.variableLength)
+                                  position: Position.arrow, length: arrowWidth)
 
         // Deliberately born narrow: macOS drops a status item created wider than
         // the free space, but happily clips one that grows into it.
@@ -192,6 +205,7 @@ final class MenuBarHider {
         }
         lastGoodLength = step
         lastCalibratedX = .greatestFiniteMagnitude
+        wallLength = 0
         Log.debug("positions reset")
         if wasHidden { hide() }
     }
@@ -253,6 +267,7 @@ final class MenuBarHider {
         let settled = keepingMore ? high : low
         guard await applySeparatorPosition(settled) else { return }
         separatorPosition = settled
+        wallLength = 0            // the whole geometry just moved
         Log.debug("separator -> \(settled); gap \(Int(startGap)) -> \(Int(separatorGap))")
         finishSeparatorMove(restoringHidden: wasHidden)
     }
@@ -283,9 +298,21 @@ final class MenuBarHider {
     /// background poll, which must not keep re-running a measurement that has
     /// already concluded there is no room.
     func revalidate(force: Bool) {
-        guard isHidden else { return }
+        // The cheap read comes first, and it mutates nothing. Re-measuring costs
+        // several length changes, and while they run the icons flash back into
+        // view — so an app switch that changed nothing must cost nothing.
+        guard isHidden, needsRecalibration else { return }
         if !force, let stoodDownAt,
            Date().timeIntervalSince(stoodDownAt) < Self.standDownRetryInterval { return }
+        calibrate()
+    }
+
+    /// Re-measures unconditionally. For things the user just asked for, where
+    /// "nothing looks different, so do nothing" would read as the command being
+    /// ignored.
+    func recalibrateNow() {
+        guard isHidden else { return }
+        stoodDownAt = nil
         calibrate()
     }
 
@@ -300,7 +327,7 @@ final class MenuBarHider {
         if stoodDownAt != nil { return true }             // retry is rate-limited below
         guard isPlacedCorrectly else { return true }
         if expanderItem.length < lastGoodLength - 1 { return true }
-        if let x = expanderFrame?.origin.x, x > lastCalibratedX + step / 2 { return true }
+        if let x = expanderFrame?.origin.x, abs(x - lastCalibratedX) > step / 2 { return true }
         return false
     }
 
@@ -352,8 +379,28 @@ final class MenuBarHider {
     /// Finds the longest expander macOS will still lay out. Runs off the run
     /// loop because a status item's frame only updates once the menu bar has had
     /// a chance to re-lay itself out after `length` changes.
+    /// Debug-only override so a length can be pinned while measuring by eye.
+    private var forcedLength: CGFloat? {
+        guard let raw = ProcessInfo.processInfo.environment["JUSTHIDE_FORCE_LEN"],
+              let value = Double(raw) else { return nil }
+        return CGFloat(value)
+    }
+
     private func calibrate() {
         calibration?.cancel()
+        if let forced = forcedLength {
+            calibration = Task { @MainActor [weak self] in
+                guard let self, await waitForGeometry() else { return }
+                var current: CGFloat = step
+                while current < forced {
+                    current = min(current + step, forced)
+                    expanderItem.length = current
+                    guard await settle() else { return }
+                }
+                Log.debug("forced len=\(Int(forced)) x=\(Int(expanderFrame?.origin.x ?? -1))")
+            }
+            return
+        }
         calibration = Task { @MainActor [weak self] in
             guard let self else { return }
             // A previous stand-down may have taken it out of the bar.
@@ -375,10 +422,11 @@ final class MenuBarHider {
             // Phase 1 — shrink until the menu bar accepts the layout again.
             // Recovering from "too wide" is the urgent half: until it fits,
             // either nothing is hidden or the arrow itself is missing.
-            // Start from the bottom every time. Resuming near the previous
-            // length skips the part of the curve where the expander is still
-            // sliding left, and a clamp "detected" there is meaningless.
-            var length = step
+            // Resume from the last known wall. Only the very first pass has to
+            // sweep up from nothing; after that the wall is a step or two away,
+            // and starting from the bottom would flash every icon back into
+            // view for half a second on every app switch.
+            var length = wallLength > 0 ? min(wallLength, maxLength) : step
             expanderItem.length = length
             guard await settle() else { return }
 
@@ -396,6 +444,7 @@ final class MenuBarHider {
                 // Leave the bar entirely rather than park an empty sliver: at
                 // this width it hides nothing and is just a visible gap.
                 Log.debug("no room; standing down")
+                wallLength = 0
                 setExpander(inBar: false)
                 stoodDownAt = Date()
                 return
@@ -432,6 +481,7 @@ final class MenuBarHider {
                 break
             }
 
+            wallLength = length
             if hitTheWall {
                 length = await overshootPastClamp(from: length, limit: maxLength)
             }
